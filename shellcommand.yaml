@@ -1,0 +1,4 @@
+# to generate load by port forwarading
+kubectl port-forward svc/autoscale-webapp-svc 8080:80
+for i in {1..50}; do curl http://localhost:8080/burn/5 & done
+

@@ -1,0 +1,15 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: load-generator
+spec:
+  template:
+    spec:
+      containers:
+      - name: busy
+        image: curlimages/curl:8.2.1
+        command: ["/bin/sh", "-c"]
+        args:
+          - "while true; do curl -s http://autoscale-webapp-svc/burn/5 > /dev/null; done"
+      restartPolicy: Never
+
