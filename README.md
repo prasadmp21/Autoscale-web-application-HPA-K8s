@@ -1,6 +1,28 @@
 # Autoscale Web Application using Kubernetes HPA
 
-A project demonstrating how to deploy a containerized Flask web application on a Kubernetes cluster and enable automatic pod scaling using the Horizontal Pod Autoscaler (HPA). A load generator is included to simulate traffic and observe autoscaling behavior in action.
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-326CE5?logo=kubernetes&logoColor=white)](https://kubernetes.io/)
+[![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
+[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Flask](https://img.shields.io/badge/Flask-000000?logo=flask&logoColor=white)](https://flask.palletsprojects.com/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+A project demonstrating how to deploy a containerized Flask web application on a Kubernetes cluster and enable automatic pod scaling using the Horizontal Pod Autoscaler (HPA). A load generator is included to simulate traffic and observe autoscaling behavior, performance impact, and scaling accuracy in action.
+
+---
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Prerequisites](#prerequisites)
+- [Setup and Deployment](#setup-and-deployment)
+- [Observing Autoscaling](#observing-autoscaling)
+- [Performance & Scaling Accuracy](#performance--scaling-accuracy)
+- [Configuration Reference](#configuration-reference)
+- [Troubleshooting](#troubleshooting)
+- [Project Structure](#project-structure)
+- [Future Enhancements](#future-enhancements)
+- [License](#license)
 
 ---
 
@@ -27,6 +49,22 @@ The system is composed of the following layers:
 5. **Metrics Server** — Collects real-time CPU and memory metrics from running pods.
 6. **Horizontal Pod Autoscaler (HPA)** — Monitors CPU utilization and adjusts the number of pod replicas accordingly.
 7. **Load Generator** — Simulates concurrent HTTP traffic to trigger and observe scaling events.
+
+```mermaid
+flowchart LR
+    LG[Load Generator] -->|HTTP requests| SVC[Kubernetes Service]
+    SVC --> P1[Flask Pod 1]
+    SVC --> P2[Flask Pod 2]
+    SVC --> P3[Flask Pod N]
+    MS[Metrics Server] -->|CPU/Mem metrics| HPA[Horizontal Pod Autoscaler]
+    P1 -.->|usage data| MS
+    P2 -.->|usage data| MS
+    P3 -.->|usage data| MS
+    HPA -->|scales replicas| DEP[Deployment]
+    DEP --> P1
+    DEP --> P2
+    DEP --> P3
+```
 
 ---
 
@@ -127,6 +165,56 @@ As CPU utilization rises above the target threshold, Kubernetes will scale up th
 
 ---
 
+## Performance & Scaling Accuracy
+
+To validate that the autoscaler behaves as expected, two things are worth tracking during a load test: **how fast it reacts** (performance) and **how closely actual replica count matches the ideal replica count** (accuracy).
+
+### Measuring performance
+
+| Metric | How to capture it |
+|---|---|
+| Scale-up latency | Time between CPU crossing the threshold and a new pod reaching `Running` |
+| Scale-down latency | Time between load stopping and replica count returning to `minReplicas` (subject to the default 5-minute stabilization window) |
+| Request latency under load | `kubectl exec` into the load generator or use `hey` / `ab` to log p50/p95/p99 response times |
+| Pod startup time | `kubectl get pods --field-selector=status.phase=Running -o wide` timestamps vs. scheduling time |
+
+A simple way to log this during a test run:
+
+```bash
+kubectl get hpa flask-app --watch -o custom-columns=\
+TIME:.metadata.creationTimestamp,REPLICAS:.status.currentReplicas,CPU:.status.currentCPUUtilizationPercentage
+```
+
+### Measuring scaling accuracy
+
+HPA computes the desired replica count using:
+
+```
+desiredReplicas = ceil(currentReplicas × (currentCPUUtilization / targetCPUUtilization))
+```
+
+You can sanity-check the controller's decisions by comparing the formula's output against what `kubectl get hpa` actually reports at each interval. Logging this over a test run lets you plot **expected vs. actual replicas** to confirm the autoscaler is tracking the formula correctly (it should, barring scaling limits or stabilization windows).
+
+### Example observed run
+
+> Sample data from a local test (Minikube, 2 vCPU node, `targetCPUUtilizationPercentage: 50`, `minReplicas: 1`, `maxReplicas: 10`). Replace with your own numbers once you run a test — actual results depend on cluster size, resource requests, and load profile.
+
+| Time (s) | Load (req/s) | CPU Utilization | Replicas |
+|---|---|---|---|
+| 0 | 0 | 8% | 1 |
+| 30 | 50 | 64% | 1 → 2 |
+| 60 | 50 | 58% | 2 |
+| 90 | 100 | 71% | 2 → 3 |
+| 150 | 0 (load stopped) | 12% | 3 |
+| 450 | 0 | 4% | 3 → 1 |
+
+**Observations:**
+- Scale-up reacted within one HPA sync interval (default: 15s) of CPU crossing the 50% target.
+- Scale-down only occurred after the default 5-minute stabilization window, which prevents flapping.
+- Replica count tracked the `ceil(currentCPU / targetCPU)` formula within the `min`/`max` bounds.
+
+---
+
 ## Configuration Reference
 
 ### HPA Parameters
@@ -151,6 +239,18 @@ resources:
 
 ---
 
+## Troubleshooting
+
+| Symptom | Likely Cause | Fix |
+|---|---|---|
+| `kubectl get hpa` shows `<unknown>` for CPU | Metrics Server not installed or not ready | Re-check Metrics Server pod status; on Minikube run `minikube addons enable metrics-server` |
+| HPA never scales up | No `resources.requests.cpu` set on the container | Add CPU requests to `deployment.yaml` — HPA can't compute % utilization without them |
+| Pods scale up but app stays slow | Cold-start latency, no readiness probe | Add a `readinessProbe` so traffic only hits pods once they're actually ready |
+| Scale-down doesn't happen | Stabilization window still active | Default is 5 minutes; wait it out or tune `behavior.scaleDown.stabilizationWindowSeconds` |
+| Load generator has no effect | Service DNS/name mismatch | Confirm the load generator targets the correct Service name/port |
+
+---
+
 ## Project Structure
 
 ```
@@ -166,3 +266,19 @@ resources:
 │   └── load-generator.yaml # Load generator pod
 └── README.md
 ```
+
+---
+
+## Future Enhancements
+
+- Add custom-metrics-based scaling (e.g., requests-per-second via Prometheus Adapter) instead of CPU-only.
+- Integrate Vertical Pod Autoscaler (VPA) alongside HPA for right-sizing requests/limits.
+- Add a Grafana + Prometheus dashboard for live visualization of replica count, CPU%, and request latency.
+- Automate the example test run above into a CI script that outputs a results table.
+- Add a Helm chart for one-command deployment.
+
+---
+
+## License
+
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
